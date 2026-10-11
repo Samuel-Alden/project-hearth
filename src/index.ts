@@ -181,21 +181,19 @@ async function showTypingAsCharacter(
   await channel.sendTyping();
 }
 
-// Handle ordinary messages received by either Discord client.
-async function handleCharacterMessage(message: Message): Promise<void> {
-  // Prevent bots from triggering one another.
-  if (message.author.bot) return;
 
+async function handleCharacterMessage(message: Message): Promise<void> {
+  // Never let the characters trigger one another.
+  if (message.author.bot) return;
   if (!message.inGuild()) return;
 
   const content = message.content.trim();
-
   if (!content) return;
 
   const registeredIds =
     characterClients.getRegisteredCharacterIds();
 
-  // Identify which configured characters were mentioned.
+  // Find characters explicitly mentioned in the message.
   const mentionedCharacterIds = registeredIds.filter(
     (characterId) => {
       const characterClient =
@@ -207,7 +205,7 @@ async function handleCharacterMessage(message: Message): Promise<void> {
     },
   );
 
-  // If this is a reply, determine whether it targets a character.
+  // Find the character being replied to, if any.
   let repliedToCharacterId: string | undefined;
 
   if (message.reference?.messageId) {
@@ -243,28 +241,19 @@ async function handleCharacterMessage(message: Message): Promise<void> {
     }
   }
 
-  // Ignore messages that do not address a character.
-  if (
-    mentionedCharacterIds.length === 0 &&
-    !repliedToCharacterId
-  ) {
-    return;
-  }
-
-  // Match the coordinator's routing priority:
-  // a valid reply target takes precedence over a mention.
+  // Prefer a valid reply target, then an explicit mention.
   const targetCharacterId =
-    (repliedToCharacterId &&
-    characterResponders.has(repliedToCharacterId)
-      ? repliedToCharacterId
-      : undefined) ??
+    (
+      repliedToCharacterId &&
+      characterResponders.has(repliedToCharacterId)
+        ? repliedToCharacterId
+        : undefined
+    ) ??
     mentionedCharacterIds.find((id) =>
       characterResponders.has(id),
     );
 
-  if (!targetCharacterId) return;
-
-  // Remove only character mentions, preserving mentions of other users.
+  // Remove only Hearth/Kai mentions, preserving other user mentions.
   const characterUserIds = new Set(
     registeredIds.flatMap((characterId) => {
       const characterClient =
@@ -284,11 +273,11 @@ async function handleCharacterMessage(message: Message): Promise<void> {
     )
     .trim();
 
-  // Handle a message consisting only of a character mention.
-  // This set prevents both Discord clients from sending duplicate prompts.
+  // A mention without accompanying text gets a simple prompt.
   if (!cleanedContent) {
-    if (handledEmptyMentionEvents.has(message.id)) return;
+    if (!targetCharacterId) return;
 
+    if (handledEmptyMentionEvents.has(message.id)) return;
     handledEmptyMentionEvents.add(message.id);
 
     try {
@@ -307,14 +296,11 @@ async function handleCharacterMessage(message: Message): Promise<void> {
     return;
   }
 
-  try {
-    await showTypingAsCharacter(
-      targetCharacterId,
-      message.channelId,
-    ).catch((error) => {
-      console.warn("Could not display typing indicator:", error);
-    });
+  // The coordinator may select a character spontaneously, so we
+  // update this when it chooses who will respond.
+  let respondingCharacterId = targetCharacterId;
 
+  try {
     const result = await conversationCoordinator.handleMessage({
       eventId: message.id,
       channelId: message.channelId,
@@ -324,12 +310,21 @@ async function handleCharacterMessage(message: Message): Promise<void> {
       authorIsBot: message.author.bot,
       mentionedCharacterIds,
       repliedToCharacterId,
+
+      onResponseSelected: async (characterId) => {
+        respondingCharacterId = characterId;
+
+        await showTypingAsCharacter(
+          characterId,
+          message.channelId,
+        );
+      },
     });
 
-    // A duplicate event or an ineligible character produces no response.
+    // No response is normal: the coordinator may decide to stay quiet.
     if (!result) return;
 
-    // Use the selected character's client, not the receiving client's.
+    // Always send from the character selected by the coordinator.
     await sendAsCharacter(
       result.characterId,
       message,
@@ -337,7 +332,7 @@ async function handleCharacterMessage(message: Message): Promise<void> {
     );
 
     console.log(
-      `${result.characterId} handled an ordinary Discord message.`,
+      `${result.characterId} responded in ${message.channelId}.`,
     );
   } catch (error) {
     console.error(
@@ -345,15 +340,19 @@ async function handleCharacterMessage(message: Message): Promise<void> {
       error,
     );
 
+    // If the AI failed after selecting a character, send the fallback
+    // as that character rather than as the account that received the event.
+    if (!respondingCharacterId) return;
+
     try {
       await sendAsCharacter(
-        targetCharacterId,
+        respondingCharacterId,
         message,
         "I'm having trouble responding right now. Please try again shortly.",
       );
     } catch (replyError) {
       console.error(
-        "Failed to send the fallback reply:",
+        "Failed to send fallback reply:",
         replyError,
       );
     }
