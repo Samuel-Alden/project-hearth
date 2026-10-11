@@ -1,28 +1,40 @@
+
 import {
   Client,
   Events,
   GatewayIntentBits,
 } from "discord.js";
+
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createDatabase } from "./database.js";
 import { OpenRouterProvider } from "./ai/openrouter-provider.js";
-import type { AIMessage } from "./ai/provider.js";
-
 import { hearth } from "./characters/hearth.js";
-import { buildSystemPrompt } from "./characters/character-profile.js";
+import { ConversationService } from "./conversations/conversation-service.js";
+
+// --------------------------------------------------
+// Environment configuration
+// --------------------------------------------------
 
 const token = process.env.DISCORD_TOKEN;
 const apiKey = process.env.OPENROUTER_API_KEY;
 
 if (!token) {
-  throw new Error("DISCORD_TOKEN is missing. Check your .env file.");
+  throw new Error(
+    "DISCORD_TOKEN is missing. Check your .env file.",
+  );
 }
 
 if (!apiKey) {
-  throw new Error("OPENROUTER_API_KEY is missing. Check your .env file.");
+  throw new Error(
+    "OPENROUTER_API_KEY is missing. Check your .env file.",
+  );
 }
+
+// --------------------------------------------------
+// Database
+// --------------------------------------------------
 
 const projectRoot = dirname(
   dirname(fileURLToPath(import.meta.url)),
@@ -32,10 +44,28 @@ const database = createDatabase(
   join(projectRoot, "data", "hearth.sqlite"),
 );
 
+// --------------------------------------------------
+// AI provider
+// --------------------------------------------------
+
 const aiProvider = new OpenRouterProvider({
   apiKey,
   model: process.env.OPENROUTER_MODEL ?? "openrouter/free",
 });
+
+// --------------------------------------------------
+// Conversation service
+// --------------------------------------------------
+
+const conversationService = new ConversationService({
+  database,
+  aiProvider,
+  character: hearth,
+});
+
+// --------------------------------------------------
+// Discord client
+// --------------------------------------------------
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
@@ -46,10 +76,16 @@ client.once(Events.ClientReady, (readyClient) => {
   console.log("Project Hearth is ready.");
 });
 
+// --------------------------------------------------
+// Interaction handling
+// --------------------------------------------------
+
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName !== "hearth") return;
 
+  // Acknowledge promptly. If Discord rejects the interaction,
+  // stop instead of generating an undeliverable response.
   try {
     await interaction.deferReply();
   } catch (error) {
@@ -81,53 +117,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // Load recent history, newest first, then restore chronological order.
-    // Ignore legacy command-only entries from the previous implementation.
-    const history = database
-      .getRecentMessages(channelId, 20)
-      .filter((message) => message.content !== "/hearth")
-      .reverse();
-
-    const messages: AIMessage[] = history.map((message) => ({
-      role: message.speakerType === "user" ? "user" : "assistant",
-      content: message.content,
-    }));
-
-    // Save the actual message instead of the literal command name.
-    database.saveMessage({
-      discordEventId: interaction.id,
+    const response = await conversationService.handleMessage({
+      eventId: interaction.id,
       channelId,
-      speakerType: "user",
-      speakerId: interaction.user.id,
+      userId: interaction.user.id,
       content: userContent,
       createdAt: interaction.createdAt.toISOString(),
-    });
-
-    messages.push({
-      role: "user",
-      content: userContent,
-    });
-
-    const generatedText = await aiProvider.generateText({
-      system: buildSystemPrompt(hearth),
-      messages,
-      maxOutputTokens: 800,
-    });
-
-    // Keep the reply within Discord's message length limit.
-    const response =
-      generatedText.length > 1900
-        ? `${generatedText.slice(0, 1897)}...`
-        : generatedText;
-
-    // Persist the reply before sending it to Discord.
-    database.saveMessage({
-      discordEventId: interaction.id,
-      channelId,
-      speakerType: "agent",
-      speakerId: client.user?.id ?? "unknown",
-      content: response,
-      createdAt: new Date().toISOString(),
     });
 
     await interaction.editReply({
@@ -135,7 +130,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       allowedMentions: { parse: [] },
     });
 
-    console.log("AI reply generated and conversation saved.");
+    console.log("Conversation handled and reply delivered.");
   } catch (error) {
     console.error("Failed to handle /hearth:", error);
 
@@ -144,14 +139,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
         "I'm having trouble responding right now. Please try again in a little while.",
       );
     } catch (replyError) {
-      console.error("Failed to send the fallback reply:", replyError);
+      console.error(
+        "Failed to send the fallback reply:",
+        replyError,
+      );
     }
   }
 });
 
+// --------------------------------------------------
+// Discord errors
+// --------------------------------------------------
+
 client.on(Events.Error, (error) => {
   console.error("Discord client error:", error);
 });
+
+// --------------------------------------------------
+// Graceful shutdown
+// --------------------------------------------------
 
 let shuttingDown = false;
 
@@ -162,13 +168,22 @@ function shutdown(): void {
   console.log("Shutting down Project Hearth...");
 
   client.destroy();
-  database.close();
 
-  console.log("Database closed.");
+  try {
+    database.close();
+    console.log("Database closed.");
+  } catch (error) {
+    console.error("Failed to close the database:", error);
+    process.exitCode = 1;
+  }
 }
 
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
+
+// --------------------------------------------------
+// Start bot
+// --------------------------------------------------
 
 client.login(token).catch((error: unknown) => {
   console.error("Failed to connect to Discord:", error);
