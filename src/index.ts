@@ -5,12 +5,19 @@ import {
   GatewayIntentBits,
 } from "discord.js";
 
-import {
-  saveMessage,
-  closeDatabase,
-} from "./database.js";
+import { createDatabase } from "./database.js";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const token = process.env.DISCORD_TOKEN;
+
+const projectRoot = dirname(
+  dirname(fileURLToPath(import.meta.url))
+);
+
+const database = createDatabase(
+  join(projectRoot, "data", "hearth.sqlite")
+);
 
 if (!token) {
   throw new Error(
@@ -40,7 +47,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const channelId = interaction.channelId ?? "unknown";
     const timestamp = new Date().toISOString();
 
-    saveMessage({
+    database.saveMessage({
       discordEventId: interaction.id,
       channelId,
       speakerType: "user",
@@ -49,7 +56,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       createdAt: interaction.createdAt.toISOString(),
     });
 
-    saveMessage({
+    database.saveMessage({
       discordEventId: interaction.id,
       channelId,
       speakerType: "agent",
@@ -72,7 +79,7 @@ function shutdown(): void {
   console.log("Shutting down Project Hearth...");
 
   client.destroy();
-  closeDatabase();
+  database.close();
 
   console.log("Database closed.");
 }
