@@ -25,10 +25,18 @@ if (!rawGuildId) {
 const clientId: string = rawClientId;
 const guildId: string = rawGuildId;
 
+
 const commands = [
   new SlashCommandBuilder()
     .setName("hearth")
-    .setDescription("Check whether Project Hearth is awake.")
+    .setDescription("Talk with Hearth.")
+    .addStringOption((option) =>
+      option
+        .setName("message")
+        .setDescription("What would you like to say?")
+        .setRequired(true)
+        .setMaxLength(1500),
+    )
     .toJSON(),
 ];
 

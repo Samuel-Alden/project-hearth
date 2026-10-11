@@ -70,9 +70,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // Load previous messages before saving this new request.
+    const userContent = interaction.options
+      .getString("message", true)
+      .trim();
+
+    if (!userContent) {
+      await interaction.editReply(
+        "Your message cannot be empty. Try saying something!",
+      );
+      return;
+    }
+
+    // Load recent history, newest first, then restore chronological order.
+    // Ignore legacy command-only entries from the previous implementation.
     const history = database
-      .getRecentMessages(channelId, 10)
+      .getRecentMessages(channelId, 20)
+      .filter((message) => message.content !== "/hearth")
       .reverse();
 
     const messages: AIMessage[] = history.map((message) => ({
@@ -80,18 +93,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
       content: message.content,
     }));
 
-    const userMessage = {
+    // Save the actual message instead of the literal command name.
+    database.saveMessage({
       discordEventId: interaction.id,
       channelId,
-      speakerType: "user" as const,
+      speakerType: "user",
       speakerId: interaction.user.id,
-      content: "/hearth",
+      content: userContent,
       createdAt: interaction.createdAt.toISOString(),
-    };
+    });
 
-    // Save the incoming request before calling the AI.
-    database.saveMessage(userMessage);
-    messages.push({ role: "user", content: "/hearth" });
+    messages.push({
+      role: "user",
+      content: userContent,
+    });
 
     const generatedText = await aiProvider.generateText({
       system: buildSystemPrompt(hearth),
