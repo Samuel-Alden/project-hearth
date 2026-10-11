@@ -1,4 +1,3 @@
-
 export type AIMessageRole = "user" | "assistant";
 
 export interface AIMessage {

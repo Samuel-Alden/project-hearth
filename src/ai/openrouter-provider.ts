@@ -1,13 +1,16 @@
-
 import type {
   AIProvider,
   GenerateTextInput,
 } from "./provider.js";
 
+
 interface OpenRouterResponse {
+  model?: string;
   choices?: Array<{
+    finish_reason?: string | null;
     message?: {
       content?: unknown;
+      refusal?: unknown;
     };
   }>;
   error?: {
@@ -88,14 +91,60 @@ export class OpenRouterProvider implements AIProvider {
     }
 
     const data = body as OpenRouterResponse | null;
-    const content = data?.choices?.[0]?.message?.content;
+    const choice = data?.choices?.[0];
+    const message = choice?.message;
+    const content = message?.content;
 
-    if (typeof content !== "string" || !content.trim()) {
+    let textContent: string | undefined;
+
+    if (typeof content === "string") {
+      textContent = content;
+    } else if (Array.isArray(content)) {
+      // Some compatible APIs return content as text blocks.
+      textContent = content
+        .map((part) => {
+          if (
+            typeof part === "object" &&
+            part !== null &&
+            "type" in part &&
+            part.type === "text" &&
+            "text" in part &&
+            typeof part.text === "string"
+          ) {
+            return part.text;
+          }
+
+          return "";
+        })
+        .join("");
+    }
+
+    if (textContent?.trim()) {
+      return textContent.trim();
+    }
+
+    if (
+      typeof message?.refusal === "string" &&
+      message.refusal.trim()
+    ) {
       throw new Error(
-        "OpenRouter returned no text content."
+        `The AI model declined the request: ${message.refusal}`,
       );
     }
 
-    return content.trim();
+    const model = data?.model ?? this.model;
+    const finishReason = choice?.finish_reason ?? "unknown";
+    const contentType =
+      content === null
+        ? "null"
+        : Array.isArray(content)
+          ? "array"
+          : typeof content;
+
+    throw new Error(
+      `OpenRouter returned no text content ` +
+      `(model=${model}, finish_reason=${finishReason}, ` +
+      `content_type=${contentType}).`,
+    );
   }
 }

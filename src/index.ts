@@ -1,10 +1,8 @@
-import { kai } from "./characters/kai.js";
-import { CharacterClientRegistry } from "./discord/character-client-registry.js";
-
 import {
   Client,
   Events,
   GatewayIntentBits,
+  type Message,
 } from "discord.js";
 
 import { dirname, join } from "node:path";
@@ -12,8 +10,16 @@ import { fileURLToPath } from "node:url";
 
 import { createDatabase } from "./database.js";
 import { OpenRouterProvider } from "./ai/openrouter-provider.js";
+
 import { hearth } from "./characters/hearth.js";
+import { kai } from "./characters/kai.js";
+
+import { CharacterClientRegistry } from "./discord/character-client-registry.js";
 import { ConversationService } from "./conversations/conversation-service.js";
+import {
+  ConversationCoordinator,
+  type CharacterResponder,
+} from "./conversations/conversation-coordinator.js";
 
 // Environment configuration
 const token = process.env.DISCORD_TOKEN;
@@ -35,30 +41,40 @@ const database = createDatabase(
   join(projectRoot, "data", "hearth.sqlite"),
 );
 
-// AI provider
+// Shared AI provider
 const aiProvider = new OpenRouterProvider({
   apiKey,
   model: process.env.OPENROUTER_MODEL ?? "openrouter/free",
 });
 
-// Conversation service
-const conversationService = new ConversationService({
+// One conversation service per character
+const hearthConversationService = new ConversationService({
   database,
   aiProvider,
   character: hearth,
 });
 
-// Discord clients
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+const kaiConversationService = new ConversationService({
+  database,
+  aiProvider,
+  character: kai,
 });
 
+// Discord clients
+// Both clients need these intents to read ordinary guild messages.
+const messageIntents = [
+  GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildMessages,
+  GatewayIntentBits.MessageContent,
+];
+
+const client = new Client({ intents: messageIntents });
+
 const kaiClient = kaiToken
-  ? new Client({
-      intents: [GatewayIntentBits.Guilds],
-    })
+  ? new Client({ intents: messageIntents })
   : undefined;
 
+// Map character IDs to their Discord clients
 const characterClients = new CharacterClientRegistry();
 
 characterClients.register(hearth.id, client);
@@ -66,6 +82,20 @@ characterClients.register(hearth.id, client);
 if (kaiClient) {
   characterClients.register(kai.id, kaiClient);
 }
+
+// Register only characters whose Discord accounts are configured.
+const characterResponders = new Map<string, CharacterResponder>();
+
+characterResponders.set(hearth.id, hearthConversationService);
+
+if (kaiClient) {
+  characterResponders.set(kai.id, kaiConversationService);
+}
+
+// Shared coordinator
+const conversationCoordinator = new ConversationCoordinator(
+  characterResponders,
+);
 
 console.log(
   "Registered character clients:",
@@ -83,11 +113,261 @@ kaiClient?.once(Events.ClientReady, (readyClient) => {
   console.log(`Kai connected as ${readyClient.user.tag}`);
 });
 
+client.on(Events.Error, (error) => {
+  console.error("Hearth Discord client error:", error);
+});
+
 kaiClient?.on(Events.Error, (error) => {
   console.error("Kai Discord client error:", error);
 });
 
-// Hearth message handling
+// Send a message using the selected character's own Discord account.
+async function sendAsCharacter(
+  characterId: string,
+  sourceMessage: Message,
+  content: string,
+): Promise<void> {
+  const targetClient = characterClients.getClient(characterId);
+
+  if (!targetClient) {
+    throw new Error(`No Discord client registered for "${characterId}".`);
+  }
+
+  const targetChannel = await targetClient.channels.fetch(
+    sourceMessage.channelId,
+  );
+
+  if (
+    !targetChannel ||
+    !targetChannel.isTextBased() ||
+    !("send" in targetChannel) ||
+    typeof targetChannel.send !== "function"
+  ) {
+    throw new Error(
+      `Character "${characterId}" cannot send messages to this channel.`,
+    );
+  }
+
+  await targetChannel.send({
+    content,
+    reply: {
+      messageReference: sourceMessage.id,
+      failIfNotExists: false,
+    },
+    allowedMentions: { parse: [] },
+  });
+}
+
+// Display the typing indicator as the character that will respond.
+async function showTypingAsCharacter(
+  characterId: string,
+  channelId: string,
+): Promise<void> {
+  const targetClient = characterClients.getClient(characterId);
+
+  if (!targetClient) return;
+
+  const channel = await targetClient.channels.fetch(channelId);
+
+  if (
+    !channel ||
+    !channel.isTextBased() ||
+    !("sendTyping" in channel) ||
+    typeof channel.sendTyping !== "function"
+  ) {
+    return;
+  }
+
+  await channel.sendTyping();
+}
+
+// Handle ordinary messages received by either Discord client.
+async function handleCharacterMessage(message: Message): Promise<void> {
+  // Prevent bots from triggering one another.
+  if (message.author.bot) return;
+
+  if (!message.inGuild()) return;
+
+  const content = message.content.trim();
+
+  if (!content) return;
+
+  const registeredIds =
+    characterClients.getRegisteredCharacterIds();
+
+  // Identify which configured characters were mentioned.
+  const mentionedCharacterIds = registeredIds.filter(
+    (characterId) => {
+      const characterClient =
+        characterClients.getClient(characterId);
+
+      return characterClient?.user
+        ? message.mentions.has(characterClient.user)
+        : false;
+    },
+  );
+
+  // If this is a reply, determine whether it targets a character.
+  let repliedToCharacterId: string | undefined;
+
+  if (message.reference?.messageId) {
+    try {
+      const referenceChannelId = message.reference.channelId;
+
+      if (
+        !referenceChannelId ||
+        referenceChannelId === message.channelId
+      ) {
+        const referencedMessage =
+          await message.channel.messages.fetch(
+            message.reference.messageId,
+          );
+
+        repliedToCharacterId = registeredIds.find(
+          (characterId) => {
+            const characterClient =
+              characterClients.getClient(characterId);
+
+            return (
+              characterClient?.user?.id ===
+              referencedMessage.author.id
+            );
+          },
+        );
+      }
+    } catch (error) {
+      console.warn(
+        "Could not identify the replied-to character:",
+        error,
+      );
+    }
+  }
+
+  // Ignore messages that do not address a character.
+  if (
+    mentionedCharacterIds.length === 0 &&
+    !repliedToCharacterId
+  ) {
+    return;
+  }
+
+  // Match the coordinator's routing priority:
+  // a valid reply target takes precedence over a mention.
+  const targetCharacterId =
+    (repliedToCharacterId &&
+    characterResponders.has(repliedToCharacterId)
+      ? repliedToCharacterId
+      : undefined) ??
+    mentionedCharacterIds.find((id) =>
+      characterResponders.has(id),
+    );
+
+  if (!targetCharacterId) return;
+
+  // Remove only character mentions, preserving mentions of other users.
+  const characterUserIds = new Set(
+    registeredIds.flatMap((characterId) => {
+      const characterClient =
+        characterClients.getClient(characterId);
+
+      return characterClient?.user
+        ? [characterClient.user.id]
+        : [];
+    }),
+  );
+
+  const cleanedContent = content
+    .replace(
+      /<@!?(\d+)>/g,
+      (mention, mentionedUserId: string) =>
+        characterUserIds.has(mentionedUserId) ? "" : mention,
+    )
+    .trim();
+
+  // Handle a message consisting only of a character mention.
+  // This set prevents both Discord clients from sending duplicate prompts.
+  if (!cleanedContent) {
+    if (handledEmptyMentionEvents.has(message.id)) return;
+
+    handledEmptyMentionEvents.add(message.id);
+
+    try {
+      await sendAsCharacter(
+        targetCharacterId,
+        message,
+        "Hey! What would you like to talk about?",
+      );
+    } catch (error) {
+      console.error(
+        "Failed to send the character prompt:",
+        error,
+      );
+    }
+
+    return;
+  }
+
+  try {
+    await showTypingAsCharacter(
+      targetCharacterId,
+      message.channelId,
+    ).catch((error) => {
+      console.warn("Could not display typing indicator:", error);
+    });
+
+    const result = await conversationCoordinator.handleMessage({
+      eventId: message.id,
+      channelId: message.channelId,
+      userId: message.author.id,
+      content: cleanedContent,
+      createdAt: message.createdAt.toISOString(),
+      authorIsBot: message.author.bot,
+      mentionedCharacterIds,
+      repliedToCharacterId,
+    });
+
+    // A duplicate event or an ineligible character produces no response.
+    if (!result) return;
+
+    // Use the selected character's client, not the receiving client's.
+    await sendAsCharacter(
+      result.characterId,
+      message,
+      result.content,
+    );
+
+    console.log(
+      `${result.characterId} handled an ordinary Discord message.`,
+    );
+  } catch (error) {
+    console.error(
+      "Failed to handle ordinary Discord message:",
+      error,
+    );
+
+    try {
+      await sendAsCharacter(
+        targetCharacterId,
+        message,
+        "I'm having trouble responding right now. Please try again shortly.",
+      );
+    } catch (replyError) {
+      console.error(
+        "Failed to send the fallback reply:",
+        replyError,
+      );
+    }
+  }
+}
+
+// Keep track of mention-only messages because they bypass AI processing.
+const handledEmptyMentionEvents = new Set<string>();
+
+// Both clients use the same handler and coordinator.
+client.on(Events.MessageCreate, handleCharacterMessage);
+kaiClient?.on(Events.MessageCreate, handleCharacterMessage);
+
+// Preserve the existing /hearth slash command.
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName !== "hearth") return;
@@ -123,13 +403,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    const response = await conversationService.handleMessage({
-      eventId: interaction.id,
-      channelId,
-      userId: interaction.user.id,
-      content: userContent,
-      createdAt: interaction.createdAt.toISOString(),
-    });
+    const response =
+      await hearthConversationService.handleMessage({
+        eventId: interaction.id,
+        channelId,
+        userId: interaction.user.id,
+        content: userContent,
+        createdAt: interaction.createdAt.toISOString(),
+      });
 
     await interaction.editReply({
       content: response,
@@ -153,16 +434,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// General Discord client errors
-client.on(Events.Error, (error) => {
-  console.error("Hearth Discord client error:", error);
-});
-
 // Graceful shutdown
 let shuttingDown = false;
 
 function shutdown(): void {
   if (shuttingDown) return;
+
   shuttingDown = true;
 
   console.log("Shutting down Project Hearth...");
@@ -182,7 +459,7 @@ function shutdown(): void {
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);
 
-// Start the Discord clients
+// Start both configured Discord clients.
 async function start(): Promise<void> {
   const loginTasks: Promise<void>[] = [];
 
@@ -212,7 +489,10 @@ async function start(): Promise<void> {
 
   for (const result of results) {
     if (result.status === "rejected") {
-      console.error("A Discord client failed to log in:", result.reason);
+      console.error(
+        "A Discord client failed to log in:",
+        result.reason,
+      );
       process.exitCode = 1;
     }
   }
