@@ -1,13 +1,9 @@
-import type {
-  AIMessage,
-  AIProvider,
-} from "../ai/provider.js";
 
+import type { AIMessage, AIProvider } from "../ai/provider.js";
 import {
   buildSystemPrompt,
   type CharacterProfile,
 } from "../characters/character-profile.js";
-
 import type {
   NewMessage,
   StoredMessage,
@@ -15,7 +11,6 @@ import type {
 
 interface ConversationDatabase {
   saveMessage(message: NewMessage): void;
-
   getRecentMessages(
     channelId: string,
     limit?: number,
@@ -56,34 +51,63 @@ export class ConversationService {
       throw new Error("Message cannot be empty.");
     }
 
-    // Load recent messages before saving the current request.
-    // The database returns newest first, so restore chronological order.
-    // Ignore legacy command-only entries from the early prototype.
-    const history = this.database
-      .getRecentMessages(input.channelId, 20)
+    // Fetch the current message plus up to 20 recent messages.
+    // getRecentMessages returns messages newest-first.
+    const recentMessages = this.database.getRecentMessages(
+      input.channelId,
+      21,
+    );
+
+    // Ordinary Discord messages may already have been stored by
+    // the message handler. Slash-command inputs are stored here.
+    const currentMessageAlreadyStored = recentMessages.some(
+      (message) =>
+        message.discordEventId === input.eventId &&
+        message.speakerType === "user",
+    );
+
+    // Exclude the current event from history so it is not
+    // included twice in the AI prompt.
+    const history = recentMessages
+      .filter(
+        (message) => message.discordEventId !== input.eventId,
+      )
       .filter((message) => message.content !== "/hearth")
+      .slice(0, 20)
       .reverse();
 
+    // Preserve chronological order and distinguish characters
+    // from Discord members in the conversation context.
     const messages: AIMessage[] = history.map((message) => ({
-      role: message.speakerType === "user" ? "user" : "assistant",
-      content: message.content,
+      role: message.speakerType === "user"
+        ? "user"
+        : "assistant",
+      content: message.speakerType === "user"
+        ? `[Discord member ${message.speakerId}]: ${message.content}`
+        : `[${message.speakerId}]: ${message.content}`,
     }));
 
+    // Add the current message exactly once to the AI context.
     messages.push({
       role: "user",
       content,
     });
 
-    // Persist the user's message before calling the model.
-    this.database.saveMessage({
-      discordEventId: input.eventId,
-      channelId: input.channelId,
-      speakerType: "user",
-      speakerId: input.userId,
-      content,
-      createdAt: input.createdAt,
-    });
+    // Persist slash-command input here. Ordinary messages are
+    // already stored by the Discord message handler.
+    if (!currentMessageAlreadyStored) {
+      this.database.saveMessage({
+        discordEventId: input.eventId,
+        channelId: input.channelId,
+        speakerType: "user",
+        speakerId: input.userId,
+        content,
+        createdAt: input.createdAt,
+      });
+    }
 
+    // Generate a reply using this character's own personality
+    // and the shared recent conversation history.
     const generatedText = await this.aiProvider.generateText({
       system: buildSystemPrompt(this.character),
       messages,
@@ -91,16 +115,17 @@ export class ConversationService {
     });
 
     if (!generatedText.trim()) {
-      throw new Error("The AI provider returned an empty response.");
+      throw new Error(
+        "The AI provider returned an empty response.",
+      );
     }
 
-    // Discord messages have a 2,000-character limit.
-    const response =
-      generatedText.length > 1900
-        ? `${generatedText.slice(0, 1897)}...`
-        : generatedText;
+    // Stay safely within Discord's regular message length limit.
+    const response = generatedText.length > 1900
+      ? `${generatedText.slice(0, 1897)}...`
+      : generatedText;
 
-    // Persist the reply only after generation succeeds.
+    // Save the response before returning it to the Discord handler.
     this.database.saveMessage({
       discordEventId: input.eventId,
       channelId: input.channelId,

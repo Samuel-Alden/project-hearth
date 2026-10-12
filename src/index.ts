@@ -181,6 +181,7 @@ async function showTypingAsCharacter(
   await channel.sendTyping();
 }
 
+const receivedDiscordMessageIds = new Set<string>();
 
 async function handleCharacterMessage(message: Message): Promise<void> {
   // Never let the characters trigger one another.
@@ -189,6 +190,44 @@ async function handleCharacterMessage(message: Message): Promise<void> {
 
   const content = message.content.trim();
   if (!content) return;
+
+
+  // Both Discord clients can receive the same human message.
+  // Process and persist that message only once.
+  if (receivedDiscordMessageIds.has(message.id)) return;
+
+  receivedDiscordMessageIds.add(message.id);
+
+  // Keep the in-memory deduplication set bounded.
+  while (receivedDiscordMessageIds.size > 5000) {
+    const oldestId =
+      receivedDiscordMessageIds.values().next().value;
+
+    if (oldestId === undefined) break;
+
+    receivedDiscordMessageIds.delete(oldestId);
+  }
+
+  // Store the message even when neither character responds.
+  try {
+    database.saveMessage({
+      discordEventId: message.id,
+      channelId: message.channelId,
+      speakerType: "user",
+      speakerId: message.author.id,
+      content,
+      createdAt: message.createdAt.toISOString(),
+    });
+  } catch (error) {
+    receivedDiscordMessageIds.delete(message.id);
+
+    console.error(
+      "Failed to store incoming Discord message:",
+      error,
+    );
+
+    return;
+  }
 
   const registeredIds =
     characterClients.getRegisteredCharacterIds();

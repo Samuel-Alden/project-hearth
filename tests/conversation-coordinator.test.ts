@@ -83,10 +83,16 @@ describe("ConversationCoordinator", () => {
     expect(hearth.handleMessage).not.toHaveBeenCalled();
   });
 
+
   it("ignores messages with no eligible character", async () => {
     const hearth = createResponder("Hello!");
+
     const coordinator = new ConversationCoordinator(
       new Map([["hearth", hearth]]),
+      {
+        // Test explicit routing without spontaneous responses.
+        spontaneousResponseChance: 0,
+      },
     );
 
     const result = await coordinator.handleMessage(

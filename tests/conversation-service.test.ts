@@ -132,15 +132,24 @@ describe("ConversationService", () => {
 
     expect(getRecentMessages).toHaveBeenCalledWith(
       "channel-123",
-      20,
+      21,
     );
 
     expect(generateText).toHaveBeenCalledWith({
       system: expect.stringContaining("You are Hearth"),
       messages: [
-        { role: "user", content: "Earlier message" },
-        { role: "assistant", content: "Earlier reply" },
-        { role: "user", content: "Hello, Hearth!" },
+        {
+          role: "user",
+          content: "[Discord member user-123]: Earlier message",
+        },
+        {
+          role: "assistant",
+          content: "[hearth]: Earlier reply",
+        },
+        {
+          role: "user",
+          content: "Hello, Hearth!",
+        },
       ],
       maxOutputTokens: 800,
     });
@@ -193,7 +202,7 @@ describe("ConversationService", () => {
     expect(generateText).toHaveBeenCalledWith(
       expect.objectContaining({
         messages: [
-          { role: "user", content: "A real earlier message" },
+          { role: "user", content: "[Discord member user-123]: A real earlier message" },
           { role: "user", content: "Hello, Hearth!" },
         ],
       }),

@@ -26,9 +26,9 @@ export interface ConversationCoordinatorOptions {
 }
 
 const DEFAULT_OPTIONS = {
-  spontaneousResponseChance: 0.1,
-  spontaneousCooldownMs: 90_000,
-  minSpontaneousMessageLength: 12,
+  spontaneousResponseChance: 1,
+  spontaneousCooldownMs: 1_000,
+  minSpontaneousMessageLength: 5,
   maxRememberedEvents: 5000,
 };
 
