@@ -15,6 +15,18 @@ interface OpenRouterResponse {
   }>;
   error?: {
     message?: string;
+    code?: number | string;
+    metadata?: {
+      provider_name?: string;
+      is_byok?: boolean;
+    };
+  };
+  metadata?: {
+    raw?: string;
+    provider_name?: string;
+    provider_error_code?: string;
+    limit_source?: string;
+    remedy_hint?: string;
   };
 }
 
@@ -82,12 +94,21 @@ export class OpenRouterProvider implements AIProvider {
 
     if (!response.ok) {
       const errorBody = body as OpenRouterResponse | null;
+      const apiError = errorBody?.error;
+
+      console.error(
+        "OpenRouter error details:",
+        JSON.stringify(apiError, null, 2),
+      );
+
       const message =
-        typeof errorBody?.error?.message === "string"
-          ? errorBody.error.message
+        typeof apiError?.message === "string"
+          ? apiError.message
           : `HTTP ${response.status}`;
 
-      throw new Error(`OpenRouter request failed: ${message}`);
+      throw new Error(
+        `OpenRouter request failed (${response.status}): ${message}`,
+      );
     }
 
     const data = body as OpenRouterResponse | null;

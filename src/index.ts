@@ -9,6 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createDatabase } from "./database.js";
+import { createParticipationDecider } from "./conversations/participation-decider.js";
 import { OpenRouterProvider } from "./ai/openrouter-provider.js";
 
 import { hearth } from "./characters/hearth.js";
@@ -95,6 +96,13 @@ if (kaiClient) {
 // Shared coordinator
 const conversationCoordinator = new ConversationCoordinator(
   characterResponders,
+  {
+    shouldRespond: createParticipationDecider({
+      aiProvider,
+      database,
+      historyLimit: 8,
+    }),
+  },
 );
 
 console.log(
