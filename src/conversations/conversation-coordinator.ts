@@ -21,6 +21,7 @@ export interface ConversationCoordinatorOptions {
   spontaneousCooldownMs?: number;
   minSpontaneousMessageLength?: number;
   maxRememberedEvents?: number;
+  conversationalFocusDurationMs?: number;
   random?: () => number;
   now?: () => number;
   shouldRespond?: (
@@ -34,16 +35,24 @@ const DEFAULT_OPTIONS = {
   spontaneousCooldownMs: 1_000,
   minSpontaneousMessageLength: 5,
   maxRememberedEvents: 5000,
+  conversationalFocusDurationMs: 5 * 60 * 1_000,
 };
+
+interface ConversationalFocus {
+  characterId: string;
+  expiresAt: number;
+}
 
 export class ConversationCoordinator {
   private readonly processedEventIds = new Set<string>();
   private readonly spontaneousRespondedAt = new Map<string, number>();
+  private readonly conversationalFocus = new Map<string, ConversationalFocus>();
 
   private readonly spontaneousResponseChance: number;
   private readonly spontaneousCooldownMs: number;
   private readonly minSpontaneousMessageLength: number;
   private readonly maxRememberedEvents: number;
+  private readonly conversationalFocusDurationMs: number;
   private readonly random: () => number;
   private readonly now: () => number;
   private readonly shouldRespond: (
@@ -75,6 +84,10 @@ export class ConversationCoordinator {
       ),
     );
 
+    this.conversationalFocusDurationMs =
+      options.conversationalFocusDurationMs ??
+      DEFAULT_OPTIONS.conversationalFocusDurationMs;
+
     this.random = options.random ?? Math.random;
     this.shouldRespond = options.shouldRespond ?? (async () => true);
     this.now = options.now ?? Date.now;
@@ -90,6 +103,10 @@ export class ConversationCoordinator {
 
     if (this.spontaneousCooldownMs < 0) {
       throw new Error("Spontaneous cooldown cannot be negative.");
+    }
+
+    if (this.conversationalFocusDurationMs < 0) {
+      throw new Error("Conversational focus duration cannot be negative.");
     }
   }
 
@@ -147,17 +164,30 @@ export class ConversationCoordinator {
         return null;
       }
 
-      // Pick exactly one eligible character.
-      const selection = this.random();
-      const index = Math.min(
-        eligibleCharacterIds.length - 1,
-        Math.floor(
-          Math.max(0, Math.min(0.999999999, selection)) *
-            eligibleCharacterIds.length,
-        ),
+      // Prefer the character the user has been talking to. A focus expires
+      // after a quiet period, so an old conversation cannot own the channel
+      // indefinitely. When there is no active focus, choose one character.
+      const focusedCharacterId = this.getFocusedCharacter(
+        message.channelId,
+        currentTime,
       );
+      if (
+        focusedCharacterId &&
+        eligibleCharacterIds.includes(focusedCharacterId)
+      ) {
+        characterId = focusedCharacterId;
+      } else {
+        const selection = this.random();
+        const index = Math.min(
+          eligibleCharacterIds.length - 1,
+          Math.floor(
+            Math.max(0, Math.min(0.999999999, selection)) *
+              eligibleCharacterIds.length,
+          ),
+        );
 
-      characterId = eligibleCharacterIds[index];
+        characterId = eligibleCharacterIds[index];
+      }
 
       if (!characterId) return null;
 
@@ -166,6 +196,12 @@ export class ConversationCoordinator {
         message.channelId,
         currentTime,
       );
+    }
+
+    // Explicit mentions/replies establish focus; subsequent unaddressed
+    // follow-ups keep it alive. This remains channel-specific.
+    if (characterId) {
+      this.setConversationalFocus(message.channelId, characterId, this.now());
     }
 
     // Ensure a character was selected and preserve the narrowed type.
@@ -247,6 +283,48 @@ export class ConversationCoordinator {
       }
 
       throw error;
+    }
+  }
+
+  private getFocusedCharacter(
+    channelId: string,
+    currentTime: number,
+  ): string | undefined {
+    const focus = this.conversationalFocus.get(channelId);
+
+    if (!focus) return undefined;
+
+    if (
+      focus.expiresAt <= currentTime ||
+      !this.responders.has(focus.characterId)
+    ) {
+      this.conversationalFocus.delete(channelId);
+      return undefined;
+    }
+
+    return focus.characterId;
+  }
+
+  private setConversationalFocus(
+    channelId: string,
+    characterId: string,
+    currentTime: number,
+  ): void {
+    // Refreshing a channel moves it to the end of the map. Keep the focus
+    // cache bounded for long-running bots that see many channels.
+    this.conversationalFocus.delete(channelId);
+    this.conversationalFocus.set(channelId, {
+      characterId,
+      expiresAt: currentTime + this.conversationalFocusDurationMs,
+    });
+
+    while (this.conversationalFocus.size > this.maxRememberedEvents) {
+      const oldestChannelId =
+        this.conversationalFocus.keys().next().value;
+
+      if (oldestChannelId === undefined) break;
+
+      this.conversationalFocus.delete(oldestChannelId);
     }
   }
 
