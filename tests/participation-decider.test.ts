@@ -62,7 +62,7 @@ describe("createParticipationDecider", () => {
 
     expect(aiProvider.generateText).toHaveBeenCalledWith(
       expect.objectContaining({
-        maxOutputTokens: 128,
+        maxOutputTokens: 1000,
         messages: [
           expect.objectContaining({
             role: "user",
