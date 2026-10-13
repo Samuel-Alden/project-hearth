@@ -23,6 +23,10 @@ export interface ConversationCoordinatorOptions {
   maxRememberedEvents?: number;
   random?: () => number;
   now?: () => number;
+  shouldRespond?: (
+    message: CoordinatedMessage,
+    characterId: string,
+  ) => Promise<boolean>;
 }
 
 const DEFAULT_OPTIONS = {
@@ -42,6 +46,10 @@ export class ConversationCoordinator {
   private readonly maxRememberedEvents: number;
   private readonly random: () => number;
   private readonly now: () => number;
+  private readonly shouldRespond: (
+    message: CoordinatedMessage,
+    characterId: string,
+  ) => Promise<boolean>;
 
   constructor(
     private readonly responders: ReadonlyMap<string, CharacterResponder>,
@@ -68,6 +76,7 @@ export class ConversationCoordinator {
     );
 
     this.random = options.random ?? Math.random;
+    this.shouldRespond = options.shouldRespond ?? (async () => true);
     this.now = options.now ?? Date.now;
 
     if (
@@ -163,6 +172,42 @@ export class ConversationCoordinator {
     if (!characterId) return null;
 
     const selectedCharacterId = characterId;
+
+    if (
+      isSpontaneous &&
+      characterId &&
+      spontaneousTimestamp !== undefined
+    ) {
+      let approved: boolean;
+
+      try {
+        approved = await this.shouldRespond(message, characterId);
+      } catch (error) {
+        // Permit a retry if the decision check fails.
+        this.processedEventIds.delete(message.eventId);
+
+        if (
+          this.spontaneousRespondedAt.get(message.channelId) ===
+          spontaneousTimestamp
+        ) {
+          this.spontaneousRespondedAt.delete(message.channelId);
+        }
+
+        throw error;
+      }
+
+      if (!approved) {
+        // A declined response should not consume the channel cooldown.
+        if (
+          this.spontaneousRespondedAt.get(message.channelId) ===
+          spontaneousTimestamp
+        ) {
+          this.spontaneousRespondedAt.delete(message.channelId);
+        }
+
+        return null;
+      }
+    }
     const responder = this.responders.get(selectedCharacterId);
 
     if (!responder) return null;

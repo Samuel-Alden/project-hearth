@@ -244,4 +244,51 @@ describe("ConversationCoordinator", () => {
     expect(random).toHaveBeenCalledOnce();
     expect(hearth.handleMessage).not.toHaveBeenCalled();
   });
+
+
+  it("can decline a spontaneous response", async () => {
+    const hearth = createResponder("Hello!");
+    const shouldRespond = vi.fn().mockResolvedValue(false);
+
+    const coordinator = new ConversationCoordinator(
+      new Map([["hearth", hearth]]),
+      {
+        spontaneousResponseChance: 1,
+        random: () => 0,
+        shouldRespond,
+      },
+    );
+
+    const result = await coordinator.handleMessage(
+      createMessage({
+        content: "I finally finished my programming project today!",
+      }),
+    );
+
+    expect(result).toBeNull();
+    expect(shouldRespond).toHaveBeenCalledOnce();
+    expect(hearth.handleMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not apply the spontaneous decision check to direct mentions", async () => {
+    const hearth = createResponder("Hello!");
+    const shouldRespond = vi.fn().mockResolvedValue(false);
+
+    const coordinator = new ConversationCoordinator(
+      new Map([["hearth", hearth]]),
+      {
+        shouldRespond,
+      },
+    );
+
+    const result = await coordinator.handleMessage(
+      createMessage({
+        mentionedCharacterIds: ["hearth"],
+      }),
+    );
+
+    expect(result?.characterId).toBe("hearth");
+    expect(hearth.handleMessage).toHaveBeenCalledOnce();
+    expect(shouldRespond).not.toHaveBeenCalled();
+  });
 });
