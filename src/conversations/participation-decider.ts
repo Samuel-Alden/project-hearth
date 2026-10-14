@@ -138,6 +138,8 @@ export function createParticipationDecider(
         ],
         // Give reasoning models enough room to produce a visible answer.
         maxOutputTokens: 1000,
+
+        maxRetries: 0,
       });
     } catch (error) {
       // This decision is optional. If the AI fails, stay quiet rather
