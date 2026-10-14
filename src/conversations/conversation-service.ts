@@ -1,5 +1,4 @@
-
-import type { AIMessage, AIProvider } from "../ai/provider.js";
+import type { AIProvider } from "../ai/provider.js";
 import {
   buildSystemPrompt,
   type CharacterProfile,
@@ -8,6 +7,10 @@ import type {
   NewMessage,
   StoredMessage,
 } from "../database.js";
+import {
+  buildTranscript,
+  stripLeadingSpeakerLabel,
+} from "./transcript.js";
 
 interface ConversationDatabase {
   saveMessage(message: NewMessage): void;
@@ -76,20 +79,14 @@ export class ConversationService {
       .slice(0, 20)
       .reverse();
 
-    // Preserve chronological order and distinguish characters
-    // from Discord members in the conversation context.
-    const messages: AIMessage[] = history.map((message) => ({
-      role: message.speakerType === "user"
-        ? "user"
-        : "assistant",
-      content: message.speakerType === "user"
-        ? `[Discord member ${message.speakerId}]: ${message.content}`
-        : `[${message.speakerId}]: ${message.content}`,
-    }));
-
-    // Add the current message exactly once to the AI context.
-    messages.push({
-      role: "user",
+    // The conversation is sent as ONE transcript message instead of
+    // role-tagged turns. With role tagging, every character's earlier lines
+    // were "assistant" turns, so a character saw other characters' lines as
+    // its own, and prefixed labels like "[hearth]:" were copied into replies.
+    // A transcript also avoids consecutive same-role messages, which some
+    // models reject.
+    const transcript = buildTranscript(history, {
+      userId: input.userId,
       content,
     });
 
@@ -110,20 +107,39 @@ export class ConversationService {
     // and the shared recent conversation history.
     const generatedText = await this.aiProvider.generateText({
       system: buildSystemPrompt(this.character),
-      messages,
+      messages: [
+        {
+          role: "user",
+          content: [
+            "Recent conversation, oldest to newest:",
+            ...transcript,
+            "",
+            `Reply to the latest message as ${this.character.name}.`,
+            `Write only ${this.character.name}'s own words, with no name, brackets or speaker label at the start.`,
+          ].join("\n"),
+        },
+      ],
       maxOutputTokens: 800,
     });
 
-    if (!generatedText.trim()) {
+    // Models sometimes echo a transcript label anyway. Remove only this
+    // character's own label at the very start of the reply, before the
+    // reply is validated, saved, or sent.
+    const cleanedText = stripLeadingSpeakerLabel(
+      generatedText,
+      this.character,
+    );
+
+    if (!cleanedText.trim()) {
       throw new Error(
         "The AI provider returned an empty response.",
       );
     }
 
     // Stay safely within Discord's regular message length limit.
-    const response = generatedText.length > 1900
-      ? `${generatedText.slice(0, 1897)}...`
-      : generatedText;
+    const response = cleanedText.length > 1900
+      ? `${cleanedText.slice(0, 1897)}...`
+      : cleanedText;
 
     // Save the response before returning it to the Discord handler.
     this.database.saveMessage({

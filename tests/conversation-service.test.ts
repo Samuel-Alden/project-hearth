@@ -140,15 +140,15 @@ describe("ConversationService", () => {
       messages: [
         {
           role: "user",
-          content: "[Discord member user-123]: Earlier message",
-        },
-        {
-          role: "assistant",
-          content: "[hearth]: Earlier reply",
-        },
-        {
-          role: "user",
-          content: "Hello, Hearth!",
+          content: [
+            "Recent conversation, oldest to newest:",
+            "Member 1: Earlier message",
+            "Hearth: Earlier reply",
+            "Member 1 (latest message): Hello, Hearth!",
+            "",
+            "Reply to the latest message as Hearth.",
+            "Write only Hearth's own words, with no name, brackets or speaker label at the start.",
+          ].join("\n"),
         },
       ],
       maxOutputTokens: 800,
@@ -199,13 +199,45 @@ describe("ConversationService", () => {
 
     await service.handleMessage(input);
 
-    expect(generateText).toHaveBeenCalledWith(
+    const prompt = generateText.mock.calls[0]?.[0].messages[0]?.content ?? "";
+    expect(prompt).toContain("Member 1: A real earlier message");
+    expect(prompt).not.toContain("/hearth");
+
+  });
+  it("removes an echoed speaker label from the reply before saving it", async () => {
+    generateText.mockResolvedValue("[hearth]: [hearth]: Hey there!");
+
+    const response = await service.handleMessage(input);
+
+    expect(response).toBe("Hey there!");
+    expect(saveMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        messages: [
-          { role: "user", content: "[Discord member user-123]: A real earlier message" },
-          { role: "user", content: "Hello, Hearth!" },
-        ],
+        speakerType: "agent",
+        content: "Hey there!",
       }),
     );
+  });
+
+  it("treats a label-only reply as empty and does not save it", async () => {
+    generateText.mockResolvedValue("[hearth]:");
+
+    await expect(
+      service.handleMessage(input),
+    ).rejects.toThrow("The AI provider returned an empty response.");
+
+    expect(saveMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not send raw Discord user IDs to the provider", async () => {
+    getRecentMessages.mockReturnValue([
+      storedMessage({ id: 1, content: "Earlier message" }),
+    ]);
+
+    await service.handleMessage(input);
+
+    const prompt =
+      generateText.mock.calls[0]?.[0].messages[0]?.content ?? "";
+
+    expect(prompt).not.toContain("user-123");
   });
 });
