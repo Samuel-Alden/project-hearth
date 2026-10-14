@@ -379,11 +379,11 @@ async function handleCharacterMessage(message: Message): Promise<void> {
     );
 
     console.log(
-      `${result.characterId} responded in ${message.channelId}.`,
+      `${result.characterId} responded to event ${message.id} in ${message.channelId}.`,
     );
   } catch (error) {
     console.error(
-      "Failed to handle ordinary Discord message:",
+      `Failed to handle Discord event ${message.id} in ${message.channelId}:`,
       error,
     );
 

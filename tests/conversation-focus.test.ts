@@ -3,7 +3,7 @@ import {
   ConversationCoordinator,
   type CharacterResponder,
   type CoordinatedMessage,
-} from "./conversation-coordinator.js";
+} from "./src/conversations/conversation-coordinator.js";
 
 function setup(options: {
   focusDurationMs?: number;
