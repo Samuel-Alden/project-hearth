@@ -20,7 +20,9 @@ import { ConversationService } from "./conversations/conversation-service.js";
 import {
   ConversationCoordinator,
   type CharacterResponder,
+  type CoordinatorResponse,
 } from "./conversations/conversation-coordinator.js";
+import { getFallbackCharacterId } from "./discord/failure-policy.js";
 
 // Environment configuration
 const token = process.env.DISCORD_TOKEN;
@@ -347,8 +349,11 @@ async function handleCharacterMessage(message: Message): Promise<void> {
   // update this when it chooses who will respond.
   let respondingCharacterId = targetCharacterId;
 
+  // Stage 1: select a character and generate the reply.
+  let result: CoordinatorResponse | null;
+
   try {
-    const result = await conversationCoordinator.handleMessage({
+    result = await conversationCoordinator.handleMessage({
       eventId: message.id,
       channelId: message.channelId,
       userId: message.author.id,
@@ -367,11 +372,44 @@ async function handleCharacterMessage(message: Message): Promise<void> {
         );
       },
     });
+  } catch (error) {
+    console.error(
+      `Failed to generate a reply for event ${message.id} in ${message.channelId}:`,
+      error,
+    );
 
-    // No response is normal: the coordinator may decide to stay quiet.
-    if (!result) return;
+    // Only an explicitly addressed character apologises publicly.
+    // Spontaneous replies fail quietly (see failure-policy.ts).
+    const fallbackCharacterId = getFallbackCharacterId({
+      explicitlyAddressed: targetCharacterId !== undefined,
+      selectedCharacterId: respondingCharacterId,
+    });
 
-    // Always send from the character selected by the coordinator.
+    if (fallbackCharacterId) {
+      try {
+        await sendAsCharacter(
+          fallbackCharacterId,
+          message,
+          "I'm having trouble responding right now. Please try again shortly.",
+        );
+      } catch (replyError) {
+        console.error(
+          `Failed to send fallback reply for event ${message.id}:`,
+          replyError,
+        );
+      }
+    }
+
+    return;
+  }
+
+  // No response is normal: the coordinator may decide to stay quiet.
+  if (!result) return;
+
+  // Stage 2: deliver. A delivery failure never triggers a fallback:
+  // the reply was generated (and saved), so a second message would only
+  // add noise, and it would probably fail the same way.
+  try {
     await sendAsCharacter(
       result.characterId,
       message,
@@ -383,26 +421,9 @@ async function handleCharacterMessage(message: Message): Promise<void> {
     );
   } catch (error) {
     console.error(
-      `Failed to handle Discord event ${message.id} in ${message.channelId}:`,
+      `Failed to deliver ${result.characterId}'s reply for event ${message.id} in ${message.channelId}:`,
       error,
     );
-
-    // If the AI failed after selecting a character, send the fallback
-    // as that character rather than as the account that received the event.
-    if (!respondingCharacterId) return;
-
-    try {
-      await sendAsCharacter(
-        respondingCharacterId,
-        message,
-        "I'm having trouble responding right now. Please try again shortly.",
-      );
-    } catch (replyError) {
-      console.error(
-        "Failed to send fallback reply:",
-        replyError,
-      );
-    }
   }
 }
 
