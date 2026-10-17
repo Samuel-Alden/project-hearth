@@ -156,8 +156,10 @@ describe("ConversationCoordinator conversational focus", () => {
   it("does not focus a character whose spontaneous reply was declined", async () => {
     // Message 1: roll 0, select Hearth. Message 2: roll 0.99, select Kai.
     const picks = [0, 0, 0.99, 0.99];
+    // Both candidates decline message 1; every later decision approves.
     const shouldRespond = vi
       .fn()
+      .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(false)
       .mockResolvedValue(true);
     const { coordinator, hearth, kai, advanceTime } = setup({

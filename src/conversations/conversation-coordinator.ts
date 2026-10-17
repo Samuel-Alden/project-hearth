@@ -22,6 +22,12 @@ export interface ConversationCoordinatorOptions {
   minSpontaneousMessageLength?: number;
   maxRememberedEvents?: number;
   conversationalFocusDurationMs?: number;
+  /**
+   * The most characters the participation decider may be asked about one
+   * unaddressed message, in turn. Each call is an AI request, so this is
+   * the cost cap. 1 asks a single character; the default is 2.
+   */
+  maxDeciderCalls?: number;
   random?: () => number;
   now?: () => number;
   shouldRespond?: (
@@ -36,6 +42,7 @@ const DEFAULT_OPTIONS = {
   minSpontaneousMessageLength: 5,
   maxRememberedEvents: 5000,
   conversationalFocusDurationMs: 5 * 60 * 1_000,
+  maxDeciderCalls: 2,
 };
 
 interface ConversationalFocus {
@@ -57,6 +64,7 @@ export class ConversationCoordinator {
   private readonly minSpontaneousMessageLength: number;
   private readonly maxRememberedEvents: number;
   private readonly conversationalFocusDurationMs: number;
+  private readonly maxDeciderCalls: number;
   private readonly random: () => number;
   private readonly now: () => number;
   private readonly shouldRespond: (
@@ -92,6 +100,9 @@ export class ConversationCoordinator {
       options.conversationalFocusDurationMs ??
       DEFAULT_OPTIONS.conversationalFocusDurationMs;
 
+    this.maxDeciderCalls =
+      options.maxDeciderCalls ?? DEFAULT_OPTIONS.maxDeciderCalls;
+
     this.random = options.random ?? Math.random;
     this.shouldRespond = options.shouldRespond ?? (async () => true);
     this.now = options.now ?? Date.now;
@@ -111,6 +122,13 @@ export class ConversationCoordinator {
 
     if (this.conversationalFocusDurationMs < 0) {
       throw new Error("Conversational focus duration cannot be negative.");
+    }
+
+    if (
+      !Number.isInteger(this.maxDeciderCalls) ||
+      this.maxDeciderCalls < 1
+    ) {
+      throw new Error("maxDeciderCalls must be an integer of at least 1.");
     }
   }
 
@@ -136,7 +154,9 @@ export class ConversationCoordinator {
             this.responders.has(id),
           );
 
-    let characterId = explicitCharacterId;
+    // Characters to consider for this message, in order. An explicit
+    // address or an active focus yields exactly one and needs no decision.
+    let candidateIds: string[] = [];
 
     // Only an unaddressed message with no active focus needs the
     // participation decider. A follow-up to the focused character does not.
@@ -144,6 +164,8 @@ export class ConversationCoordinator {
     let spontaneousTimestamp: number | undefined;
 
     if (explicitCharacterId) {
+      candidateIds = [explicitCharacterId];
+
       // The member chose this character, so it owns their conversation from
       // now on, whether or not this particular reply succeeds.
       this.setConversationalFocus(
@@ -181,9 +203,9 @@ export class ConversationCoordinator {
         // A follow-up inside an active conversation: the focused character
         // answers. This must not depend on the optional AI decision, which
         // fails silently, and it must not be randomly skipped.
-        characterId = focusedCharacterId;
+        candidateIds = [focusedCharacterId];
       } else {
-        // Nobody has this member's attention yet: maybe one character joins.
+        // Nobody has this member's attention yet: maybe a character joins.
         if (this.random() >= this.spontaneousResponseChance) {
           return null;
         }
@@ -195,7 +217,7 @@ export class ConversationCoordinator {
         }
 
         const selection = this.random();
-        const index = Math.min(
+        const firstIndex = Math.min(
           eligibleCharacterIds.length - 1,
           Math.floor(
             Math.max(0, Math.min(0.999999999, selection)) *
@@ -203,11 +225,25 @@ export class ConversationCoordinator {
           ),
         );
 
-        characterId = eligibleCharacterIds[index];
+        // The first candidate is picked at random. Later candidates follow
+        // it in registry order, wrapping around, so every character gets
+        // an equal chance to be asked first. The number asked is capped
+        // because every candidate costs one AI request.
+        const candidateCount = Math.min(
+          this.maxDeciderCalls,
+          eligibleCharacterIds.length,
+        );
+
+        candidateIds = Array.from(
+          { length: candidateCount },
+          (_, offset) =>
+            eligibleCharacterIds[
+              (firstIndex + offset) % eligibleCharacterIds.length
+            ],
+        );
+
         needsDecision = true;
       }
-
-      if (!characterId) return null;
 
       spontaneousTimestamp = currentTime;
       this.spontaneousRespondedAt.set(
@@ -216,30 +252,36 @@ export class ConversationCoordinator {
       );
     }
 
-    // Ensure a character was selected and preserve the narrowed type.
-    if (!characterId) return null;
-
-    const selectedCharacterId = characterId;
+    let selectedCharacterId: string | undefined;
 
     if (needsDecision) {
-      let approved: boolean;
+      // Ask in order; the first YES wins, so at most one character replies
+      // and later candidates are never asked once someone accepts.
+      for (const candidateId of candidateIds) {
+        let approved: boolean;
 
-      try {
-        approved = await this.shouldRespond(message, selectedCharacterId);
-      } catch (error) {
-        // Permit a retry if the decision check fails.
-        this.processedEventIds.delete(message.eventId);
-        this.releaseSpontaneousCooldown(
-          message.channelId,
-          spontaneousTimestamp,
-        );
+        try {
+          approved = await this.shouldRespond(message, candidateId);
+        } catch (error) {
+          // Permit a retry if the decision check fails.
+          this.processedEventIds.delete(message.eventId);
+          this.releaseSpontaneousCooldown(
+            message.channelId,
+            spontaneousTimestamp,
+          );
 
-        throw error;
+          throw error;
+        }
+
+        if (approved) {
+          selectedCharacterId = candidateId;
+          break;
+        }
       }
 
-      if (!approved) {
-        // A declined response consumes no cooldown and, importantly,
-        // creates no focus: the member never spoke to this character.
+      if (selectedCharacterId === undefined) {
+        // Every candidate declined. This consumes no cooldown and creates
+        // no focus: the member never spoke to any of these characters.
         this.releaseSpontaneousCooldown(
           message.channelId,
           spontaneousTimestamp,
@@ -247,9 +289,15 @@ export class ConversationCoordinator {
 
         return null;
       }
+    } else {
+      selectedCharacterId = candidateIds[0];
     }
 
-    const responder = this.responders.get(selectedCharacterId);
+    // Ensure a character was selected and preserve the narrowed type.
+    if (selectedCharacterId === undefined) return null;
+
+    const chosenCharacterId = selectedCharacterId;
+    const responder = this.responders.get(chosenCharacterId);
 
     if (!responder) return null;
 
@@ -257,7 +305,7 @@ export class ConversationCoordinator {
       // Let the Discord integration show the typing indicator before
       // the AI request starts. A typing failure should not break a reply.
       try {
-        await message.onResponseSelected?.(selectedCharacterId);
+        await message.onResponseSelected?.(chosenCharacterId);
       } catch {
         // The indicator is optional; continue generating the response.
       }
@@ -272,16 +320,17 @@ export class ConversationCoordinator {
 
       // A generated reply (re)starts this member's focus window. Declined,
       // ignored, and failed spontaneous messages never do, so focus can
-      // only lapse after real silence.
+      // only lapse after real silence. A character that joined an
+      // unaddressed message gains focus the same way.
       this.setConversationalFocus(
         message.channelId,
         message.userId,
-        selectedCharacterId,
+        chosenCharacterId,
         this.now(),
       );
 
       return {
-        characterId: selectedCharacterId,
+        characterId: chosenCharacterId,
         content: response,
       };
     } catch (error) {
